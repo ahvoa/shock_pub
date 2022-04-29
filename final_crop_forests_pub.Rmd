@@ -1,0 +1,806 @@
+---
+title: "final_crop_forests"
+output: html_document
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+
+#set working directory for the markdown document
+knitr::opts_knit$set(root.dir = 'C:/Users/ahvoa1/data')
+
+for (package in c("raster", "gstat", "ape", "ggplot2", "viridis", "reshape2", "rasterVis", "elsa", "tidyverse", "terra", "rgdal", "dplyr", "tidymodels", "foreach", "doParallel", "randomForest", "hydroGOF", "randomForestExplainer", "GGally", "iml", "gridExtra", "wesanderson", "scico", "tmap", "ggpubr")) {
+  if (!require(package, character.only=TRUE, quietly=TRUE)) {
+    install.packages(package)
+    library(package, character.only=TRUE, quietly = TRUE)
+  }
+}
+
+
+```
+
+
+
+
+```{r pesticide mean rasters, eval=FALSE}
+
+crop_list <- c("barley", "cassava", "groundnut", "maize", "millet", "potato", "rice", "sorghum", "soybean", "sugarbeet", "sugarcane", "wheat")
+
+# path to the folder where all the pesticide raw data is
+path_to_data <- "C:/Users/ahvoa1/data/pesticides/ApplicationRate/GEOTIFF"
+
+#choose high, mean or low estimate, "_2015_H.tif"
+estimate <- "_2015_L.tif"
+
+# crop names matched to SPAM and bin data
+crop_list_pest <- c("Other", "VegFru", "OrcGra", "Corn", "Rice", "Other", "Soybean", "Other", "Other", "Wheat")
+crop_names <- unique(crop_list_pest)
+
+# get all crop names
+all_crops <- grep(estimate, list.files(path_to_data),value = TRUE)
+pesticide_names <- gsub(estimate,"", all_crops )
+pesticide_names <- gsub("APR_", "", pesticide_names)
+
+# chooses only the crops in the list and their unique pesticide names
+pesticide_names <- grep(paste(crop_names, collapse = "|"), pesticide_names, value = TRUE)
+
+#get a reference raster for fixing the origin point of pesticide rasters
+reference_raster <- raster(list.files(path = "C:/Users/ahvoa1/data/fertandbins/bins/", recursive = TRUE, 
+                                pattern = crop_list[1], full.names = TRUE))
+
+
+##### calculating mean pesticide-rasters
+
+estimate_high <- "_2015_H.tif"
+estimate_low <- "_2015_L.tif"
+
+for (crop_in in crop_names) {
+  
+  # path to directory
+  path <- file.path(path_to_data)
+  
+  # create a list of crop-specific pesticide rasters to form stack
+  crop_pesticides <- grep(crop_in, pesticide_names, value = TRUE)
+  
+  for (pest_in in crop_pesticides) {
+    
+    raster_file_H <- file.path(path, paste0("APR_", pest_in, estimate_high))
+    pest_raster_H <- raster(raster_file_H)
+    #remove cells with negative values, make them NA
+    pest_raster_H[pest_raster_H <= -2] <- NA
+    pest_raster_H[pest_raster_H < 0] <- 0
+  
+    
+    raster_file_L <- file.path(path, paste0("APR_", pest_in, estimate_low))
+    pest_raster_L <- raster(raster_file_L) 
+    #remove cells with negative values, make them NA
+    pest_raster_L[pest_raster_L <= -2] <- NA
+    pest_raster_L[pest_raster_L < 0] <- 0
+  
+    
+    pest_raster_M <- raster::mean(pest_raster_H, pest_raster_L)
+    pest_raster_M <- projectRaster(pest_raster_M, reference_raster)
+
+    
+    raster::writeRaster(pest_raster_M,
+                        file.path(path_to_data, paste0("APR_", pest_in, "_2015_M.tif")),
+                        options = "INTERLEAVE=BAND",  overwrite = TRUE)
+    
+  }
+
+}
+
+
+```
+
+
+
+```{r summed and rescaled pesticide rasters, eval=FALSE}
+
+#pesticide rescaling function
+rescale <- function(raster_x) {
+  x.min=cellStats(raster_x,"min")
+  x.max=cellStats(raster_x,"max")
+  new.min <- 0
+  new.max <- 1
+  rescaled_raster <- new.min + (raster_x - x.min) * ((new.max - new.min) / (x.max - x.min))
+  return(rescaled_raster)
+}
+
+# creating standardized summed pesticide raster
+
+path_to_data <- "C:/Users/ahvoa1/data/pesticides/ApplicationRate/GEOTIFF"
+path_to_save <- "C:/Users/ahvoa1/data/pesticides/sum_and_rescaled"
+path_to_pca <- "C:/Users/ahvoa1/data/pca"
+
+#choose high, mean or low estimate, "_2015_H.tif"
+estimate <- "_2015_M.tif"
+
+# crop names matched to SPAM and bin data
+crop_list_pest <- c("Other", "VegFru", "OrcGra", "Corn", "Other", "VegFru", "Rice", "Other", "Soybean", "Other", "Other", "Wheat")
+crop_names <- unique(crop_list_pest)
+
+# get all crop names
+all_crops <- grep(estimate, list.files(path_to_data),value = TRUE)
+pesticide_names <- gsub(estimate,"", all_crops )
+pesticide_names <- gsub("APR_", "", pesticide_names)
+
+# chooses only the crops in the list and their unique pesticide names
+pesticide_names <- grep(paste(crop_names, collapse = "|"), pesticide_names, value = TRUE)
+
+EarthStat_extension <- "_HarvestedAreaHectares.tif"
+
+for (i in 1:length(crop_list)) {
+  
+  
+  earthstat_file <- list.files(path = "C:/Users/ahvoa1/data/EarthStat/",
+                                           recursive = TRUE, pattern = crop_list[i], full.names = TRUE)
+  earthstat_file <- grep(EarthStat_extension, earthstat_file, value = TRUE)
+  earthstat_raster <- raster(earthstat_file)
+  earthstat_raster[earthstat_raster <= 0] <- NA
+  sum_harvested <- earthstat_raster
+  plot(sum_harvested)
+  # path to directory
+  path <- file.path(path_to_data)
+  
+  # paths to files
+  masked_list <- list()
+
+  masked_stand_list <- list()
+ 
+  # create a list of crop-specific pesticide rasters to form stack
+  crop_pesticides <- grep(crop_list_pest[i], pesticide_names, value = TRUE)
+  
+  for (pest_in in crop_pesticides) {
+    
+    raster_file <- file.path(path, paste0("APR_", pest_in, estimate))
+    pest_raster <- raster(raster_file) 
+
+    #remove cells with negative values, make them NA or 0
+    pest_raster[pest_raster <= -2 ] <- NA #the sea
+    pest_raster[pest_raster < 0 ] <- 0.0
+    #project with reference raster
+    #pest_raster <- projectRaster(pest_raster, sum_harvested)
+    pest_raster[pest_raster < 0 ] <- 0.0
+    
+    # mask with harvested area raster
+    pest_mask <- raster::mask(pest_raster, sum_harvested, maskvalue = NA, updatevalue = NA)
+
+    #rescale values from 0 to 1
+    pest_mask_rescaled <- rescale(pest_mask)
+    
+    masked_stand_list <- append(masked_stand_list, pest_mask_rescaled)
+
+  }
+  
+  
+  #rescaled stack summed to one raster and saved
+    
+  stand_stack <- raster::stack(masked_stand_list)
+  stand_sum <- calc(stand_stack, sum)
+  #plot(stand_sum)
+  raster::writeRaster(stand_sum,
+                     file.path(path_to_save, paste0(crop_list[i], "_standpestsum", estimate)),
+                     options = "INTERLEAVE=BAND",  overwrite = TRUE)
+
+  
+}
+
+
+```
+
+
+
+
+```{r create new climate bins}
+
+#temperature and precipitation data from WorldClim database (Fick and Hijmans, 2017)
+
+####### Monthly WorldClim to annual #######
+
+dir_Worldclim <- 'C:/Users/ahvoa1/data/worldclim/'
+setwd(dir_Worldclim)
+
+
+P_filenames <- c()
+T_filenames <- c()
+
+for (month in c('01','02','03','04','05','06','07','08','09','10','11','12')){
+  
+  P_filenames <- c(P_filenames,paste0('wc2.1_5m_prec_',month,'.tif'))
+  T_filenames <- c(T_filenames,paste0('wc2.1_5m_tavg_',month,'.tif'))
+
+}
+
+P <- rast(P_filenames)
+Ts <- rast(T_filenames)
+Ts <- brick(Ts)
+
+P_tot <- sum(P)
+T_avg <- weighted.mean(Ts, w = c(31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31))
+#T_avg <- rast(T_avg)
+
+
+
+####### Crop-specific climate binning ########
+
+
+# function to create crop-specific climate bins
+create_clim_bins <- function(P_tot, T_avg, crop_mask, N) {
+  
+  # mask out non-cropland areas from climate data
+  P_tot[!crop_mask] <- NA
+  T_avg[!crop_mask] <- NA
+  
+  # raster to vector, drop na also
+  P_vec <- na.omit(c(as.matrix(P_tot)))
+  T_vec <- na.omit(c(as.matrix(T_avg)))
+  
+  # create temperature bins, based on N quantiles 
+  T_cut <- cut(T_vec, quantile(T_vec, probs = seq(0, 1, length.out = N+1) ) , include.lowest=TRUE)
+  T_bins <- (as.numeric(T_cut)-1)*N # multiply by N to allow incorporating bin info on precip too
+  
+  # initialize a vector for the climate bins (same lenght as T_bins, but all vals -9999)
+  clim_bins <- T_bins*0-9999
+  
+  # loop across the unique temperature bins, and conduct the same steps for precipitation
+  # (in other words, the quantiles are first taken from the temperature data, and from each temperature bin
+  # precip quantiles are calculated, and then categorized
+  for (T_bin in unique(T_bins)){
+    
+    # create precipitation bins for each temperature bin, based on N quantiles 
+    P_bin <- P_vec[T_bins == T_bin]
+    P_cut <- cut(P_bin, quantile(P_bin, probs = seq(0, 1, length.out = N+1) ) , include.lowest=TRUE)
+    P_bins <- as.numeric(P_cut)-1
+    
+    # add the climate bin category info to the climate_bins variable (T bin is in the tens, and P is in the ones) 
+    clim_bins[T_bins == T_bin] = T_bins[T_bins == T_bin] + P_bins
+    
+  } 
+  
+  clim_bins_raster <- rast(crop_mask)
+  clim_bins_raster[crop_mask] = clim_bins+1
+  
+  return(clim_bins_raster)
+  
+  }
+
+
+# import crop data
+
+dir_crop <- 'C:/Users/ahvoa1/data/'
+setwd(dir_crop)
+
+for (i in 1:length(crop_list)) {
+
+  #get yield rasters
+  earthstat_file <- list.files(path = "C:/Users/ahvoa1/data/EarthStat/",
+                               recursive = TRUE, pattern = paste0(crop_list[i], "_YieldPerHectare.tif"), full.names = TRUE)
+  yield_raster <- rast(earthstat_file)
+  plot(yield_raster)
+  
+  #wheat_prod <- rast('spam2010V2r0_global_P_WHEA_A.tif')
+  yield_raster[is.na(yield_raster)] <- 0 # turn nan to zero (not necessarily necessary, but just in case..)
+  
+  # cropland mask for wheat (1 where there is cropland, 0 where not)
+  yield_mask <- yield_raster > 0
+  
+  # what size bin matrix to create (N x N)
+  N = 5
+  
+  #make new P_tot and T_avg to have fresh for each crop
+  P_tot <- sum(P)
+  T_avg_raster <- rast(T_avg)
+  
+  crop_clim_bins_raster <- create_clim_bins(P_tot, T_avg_raster, yield_mask, N)
+  plot(crop_clim_bins_raster)
+  print(freq(crop_clim_bins_raster))
+  
+  r_clim_bins_raster <- raster(crop_clim_bins_raster)
+  
+  writeRaster(r_clim_bins_raster, filename= paste0('C:/Users/ahvoa1/data/fertandbins/new_bins/5x5/', crop_list[i], "_binmatrix.tif"), format="GTiff", overwrite=TRUE)
+
+}
+
+
+
+```
+
+
+```{r create dataframes from rasters to use in randomforest, eval=FALSE}
+
+
+path_to_data <- "C:/Users/ahvoa1/data/"
+path_to_save <- "C:/Users/ahvoa1/data/RDATA/5x5_bin_dfs/"
+
+harvested_extension <- "_HarvestedAreaHectares.tif"
+
+
+for (i in 1:length(crop_list)) {
+  #get new bin raster (5x5)
+  file_list <- list.files(path = paste0(path_to_data,
+                                        "fertandbins/new_bins/5x5/"), 
+                          recursive = TRUE, 
+                          pattern = crop_list[i], full.names = TRUE)
+  #get fertilizer rasters
+  fert_list <- list.files(path = paste0(path_to_data, "fertandbins/mineral_fert/NCs"),
+                          recursive = TRUE, 
+                          pattern = crop_list[i], full.names = TRUE)
+  
+  #get yield rasters
+  earthstat_file <- list.files(path = "C:/Users/ahvoa1/data/EarthStat/",
+                               recursive = TRUE, pattern = paste0(crop_list[i], "_YieldPerHectare.tif"), full.names = TRUE)
+  
+  file_list <- append(file_list, earthstat_file)
+  
+  #get pesticide rasters
+  pestsum_list <- list.files(path = "C:/Users/ahvoa1/data/pesticides/sum_and_rescaled/",
+                  recursive = TRUE, 
+                  pattern = paste0(crop_list[i], "_standpestsum_2015_M.tif"), full.names = TRUE)
+  
+  #get tractor raster
+  file_list <- append(file_list, list.files(path = "C:/Users/ahvoa1/data/fertandbins/", 
+                            recursive = TRUE, 
+                            pattern =  'tractor', full.names = TRUE))
+  file_list <- append(file_list, pestsum_list)
+  
+  crop_all <- rast(file_list[1])
+  
+  #attach yield, pestsum and tractor data to list, no need to project
+  
+  for (x in 2:length(file_list)) {
+    raster_layer <- rast(file_list[x])
+    terra::add(crop_all) <- raster_layer
+    
+  }
+  
+  #create crop harvested area raster for masking fertilizers
+  harvested_file <- list.files(path = paste0(path_to_data, "EarthStat/"),
+                                           recursive = TRUE, pattern = crop_list[i], full.names = TRUE)
+  harvested_file <- grep(harvested_extension, harvested_file, value = TRUE)
+  harvested_raster <- rast(harvested_file)
+  harvested_raster[harvested_raster <= 0] <- NA
+
+  #mask fertilizer rasters and add to stack
+  #masking so that areas covered by harvested raster with NA fert become 0
+  for (file in fert_list) {
+    fert_layer <- rast(file)
+    fert_raster <- fert_layer[[1]]
+    fert_raster[is.na(fert_raster)] <- 0
+    masked_fert <- terra::mask(fert_raster, harvested_raster, maskvalues = NA, updatevalue = NA)
+    terra::add(crop_all) <- masked_fert
+    
+  }
+    
+
+  # create dataframe with all data
+  crop_df <- terra::as.data.frame(crop_all, xy = TRUE, cells = TRUE)
+  
+  colnames(crop_df) <- new_colnames <- c("cell", "x", "y", "bin", "ES_yield_A",
+                  "machinery", "rescaled_pesticide_sum", 
+                  "K_rate", "N_rate", "P_rate")
+  
+  #check number of cells per bin
+  crop_df %>%
+    count(bin) %>%
+    print()
+  
+  file_extension <- "_new_bin_model_df.RData"
+  
+  save_name <- paste0(path_to_save, crop_list[i], file_extension)
+  
+  save(crop_df, file = save_name)
+  
+  
+}
+```
+
+
+
+```{r create random forest models, run scenarios}
+
+crop_list <- c("barley", "cassava", "groundnut", "maize", "millet", "potato", "rice", "sorghum", "soybean", "sugarbeet", "sugarcane", "wheat")
+
+
+
+##### Functions #####
+
+# divides the cells to train and test from different 60 arcmin / 1 degree boxes
+degree_sampler_function <- function(bin_data, iteration_number) {
+
+  #get coordinate values at one degree accuracy
+  x_list <- unique(floor(bin_data$x))
+  y_list <- unique(floor(bin_data$y))
+  
+  #create a matrix for all combinations of coordinates, assign to train and test
+  set.seed(123+iteration_number)
+  test_matrix <- matrix(sample(c("train", "test"), length(y_list)*length(x_list), replace = TRUE, prob = c(0.75, 0.25)), ncol = length(x_list))
+  sampler_frame <- as.data.frame(test_matrix)
+  #give names
+  colnames(sampler_frame) <- x_list
+  rownames(sampler_frame) <- y_list
+  
+  #create a column to store the division to train and test
+  bin_data$divide <- "NA"
+  
+  #for all coordinate combinations, assign row to train or test set based on sampler matrix
+  for (a in x_list) {
+    for (b in y_list) {
+      
+      bin_data[floor(bin_data$x) == a & floor(bin_data$y) == b , names(bin_data) %in% c("divide")] <- sampler_frame[as.character(b),as.character(a)]
+      
+    }
+  }
+  return(bin_data)
+}
+
+
+#creates a shock scenario and predicts the yield with the forest
+scenario_function <- function(bin_forest, scenario_input_df, result_df, scenario_percent) {
+  
+  #different shock scenarios and combinations
+  scenario_list <- list('N_rate', 'P_rate', 'K_rate', 'machinery', 'rescaled_pesticide_sum', 
+                        c('N_rate', 'P_rate', 'K_rate'),
+                        c('N_rate', 'P_rate', 'K_rate', 'machinery', 'rescaled_pesticide_sum'))
+  
+  #add column for scenario percent info
+  result_df$scenario_percent <- (1 - scenario_percent) * 100
+  
+  
+  for (group in scenario_list) {
+    scenario_group <- unlist(group)
+    scenario_input <- scenario_input_df
+    
+    # choose inputs to modify in scenario
+    if (length(scenario_group) == 1) {
+      scenario_input[[scenario_group]] <- unlist(lapply(scenario_input[[scenario_group]], function(x) x*scenario_percent))
+      
+    } else {
+      scenario_input[ , scenario_group] <- lapply(scenario_input[ , scenario_group], function(x) x*scenario_percent)
+    }
+    # predict new yields based on scenario
+    scenario_input$prediction <- predict(bin_forest, scenario_input, type = "response")
+    
+    scenario_input_to_results <- scenario_input %>%
+      dplyr::select(cell, next_results = prediction)
+    
+    # add prediction results to 
+    result_df <- result_df %>%
+      left_join(scenario_input_to_results, by = 'cell')
+    
+    if (length(scenario_group) == 5) {
+      #change column name to the scenario treatment
+      names(result_df)[names(result_df) == 'next_results'] <- "shock_all"
+    } else if (length(scenario_group) == 3) {
+      names(result_df)[names(result_df) == 'next_results'] <- "shock_fert_only"
+    } else {
+      names(result_df)[names(result_df) == 'next_results'] <- paste0(scenario_group, "_shock")
+    }
+    
+  }
+  return(result_df) 
+  
+}
+
+one_iteration <-  function(bin_data, y) {
+      
+  #divide/sample data in 60arcmin/1degree slots
+  divided_data <- degree_sampler_function(bin_data, y)
+  
+  bin_train <- divided_data %>%
+    dplyr::filter(divide == "train") %>%
+    dplyr::select(-divide)
+  
+  bin_test <- divided_data %>%
+    dplyr::filter(divide == "test" ) %>%
+    dplyr::select(-divide)
+  
+  # train forest
+  bin.rf <- randomForest(ES_yield_A ~ N_rate + P_rate + K_rate +
+                        machinery + rescaled_pesticide_sum,
+                         data = bin_train,
+                         ntree=1000, mtry = 2, nodesize = 5)
+  
+  results_out <- list()
+  
+  #save forest variables to dataframe
+  bin.df <- data.frame(matrix(nrow = 1, ncol = 5))
+  colnames(bin.df) <- c("iteration" ,"rmse", "rsq", "RMSE", "NSE")
+
+  bin.df$rmse <- sqrt(tail(bin.rf$mse,1))
+  bin.df$rsq <- tail(bin.rf$rsq,1)
+  
+  #save iteration info
+  bin.df$iteration <- y
+  
+  #validation of forest
+  bin_test$predicted <- predict(bin.rf, bin_test, type = "response")
+  
+  #save forest validation results to dataframe
+  bin.df$RMSE <- sqrt(mean((bin_test$ES_yield_A - bin_test$predicted)^2))
+  bin.df$NSE <- NSE(as.matrix(bin_test$predicted), as.matrix(bin_test$ES_yield_A))
+
+  results_out$bindf <- bin.df
+  
+  #save validation yields to dataframe with original yields
+  obs_vs_pred_iteration <- bin_test %>%
+    dplyr::select(cell, observed = ES_yield_A, model_yield = predicted) %>%
+    dplyr::mutate(iteration = y)
+  
+  results_out$obs_vs_pred <- obs_vs_pred_iteration
+  
+  
+  ##### SCENARIOS #####
+  #predict scenario yields here
+  scenario_input_data <- bin_data %>%
+    dplyr::select(cell, ES_yield_A, N_rate, P_rate, K_rate, machinery, rescaled_pesticide_sum)
+  
+  # dataframe to store original yield and scenario yields
+  scenario_yields <- bin_data %>%
+    dplyr::select(cell, x, y, observed_normal_yield = ES_yield_A)
+  
+  #predict new yields with forest
+  scenario_yields_25 <- scenario_function(bin.rf, scenario_input_data, scenario_yields, 0.25)
+
+  scenario_yields_50 <- scenario_function(bin.rf, scenario_input_data, scenario_yields, 0.5)
+
+  scenario_yields_75 <- scenario_function(bin.rf, scenario_input_data, scenario_yields, 0.75)
+
+  scenario_yields_all <- bind_rows(scenario_yields_25, scenario_yields_50)
+  scenario_yields_all <- bind_rows(scenario_yields_all, scenario_yields_75)
+  
+  #save column for iteration
+  scenario_yields_all$iteration <- y
+  
+  # add to masterdataframe
+  results_out$bin_scenarios <- scenario_yields_all
+  
+  
+  #make predictor from forest to make pdp/ale figures
+  model_variables <- bin_train %>%
+    dplyr::select(-cell, -x, -y, -ES_yield_A)
+
+  rf.predictor <- Predictor$new(bin.rf, data = model_variables, 
+                                y = bin_train$ES_yield_A)
+  
+  ale_data_iteration <- extract_ale(rf.predictor, y)
+  
+  results_out$aledf <- ale_data_iteration
+  
+  
+  return(results_out)
+  
+}
+
+
+# aggregator_function <- function(crop_dataframe){
+# 
+#   crop_dataframe$super_bin <- NA
+#   
+#   super_list <- list(c(1,2,11,12), c(3,4,13,14), c(5,6,15,16), c(7,8,17,18),
+#                   c(9,10,19,20), c(21,22,31,32), c(23,24,33,34), c(25,26,35,36),
+#                   c(27,28,37,38), c(29,30,39,40), c(41,42,51,52), c(43,44,53,54),
+#                   c(45,46,55,56), c(47,48,57,58), c(49,50,59,60), c(61,62,71,72),
+#                   c(63,64,73,74), c(65,66,75,76), c(67,68,77,78), c(69,70,79,80),
+#                   c(81,82,91,92), c(83,84,93,94), c(85,86,95,96), c(87,88,97,98),
+#                   c(89,90,99,100))
+#   
+#   for (j in 1:length(super_list)) {
+#     
+#     aggregate <- unlist(super_list[j])
+#     
+#     crop_dataframe[crop_dataframe$bin %in% aggregate, names(crop_dataframe) %in% c("super_bin")] <- j
+#     
+#   }
+#   
+#   crop_dataframe <- crop_dataframe %>%
+#     dplyr::select(-bin)
+#   
+#   return(crop_dataframe)
+#   
+# }
+
+extract_ale <- function(forest_predictor, iteration_y) {
+  
+  ale_effects <- FeatureEffects$new(forest_predictor, method = "ale")
+  ale_results <- ale_effects$results
+  ale_df <- data.frame(matrix(nrow = 0, ncol = 4))
+  colnames(ale_df) <- c("ale_value", "input_rate", "input_name", "iteration")
+  ale_df$input_name <- as.character(ale_df$input_name)
+  
+  for (input in c("N_rate", "P_rate", "K_rate", "machinery", "rescaled_pesticide_sum")){
+    
+    input_ale <- ale_results[[input]]
+
+    input_ale <- input_ale %>%
+      dplyr::rename(ale_value = .value, input_rate = .borders, input_name = .feature) %>%
+      dplyr::mutate(iteration = iteration_y) %>%
+      dplyr::select(-.type)
+    
+    ale_df <- bind_rows(ale_df, input_ale)
+    
+  }
+  
+  return(ale_df)
+  
+}
+
+##### Random forests for all crops #####
+
+
+path_to_data <- "C:/Users/ahvoa1/data/RDATA/5x5_bin_dfs/"
+
+path_to_save <- "C:/Users/ahvoa1/data/results_newbins/"
+
+#choose number of forest iterations per bin
+iterations <- 50
+
+##### CROP #####
+
+for (i in 3) {
+  
+  file_extension <- "_new_bin_model_df.RData"
+  
+  #retrieve dataframe
+  file_name <- paste0(path_to_data, crop_list[i], file_extension)
+  load(file_name)
+  
+  #dataframe to store performance score means
+  crop_means.df <- data.frame(matrix(nrow = 0, ncol = 5))
+  colnames(crop_means.df) <- c("rmse", "rsq", "RMSE", "NSE", "bin")
+  
+  #dataframe to store performance score variances
+  crop_vars.df <- data.frame(matrix(nrow = 0, ncol = 5))
+  colnames(crop_vars.df) <- c("rmse", "rsq", "RMSE", "NSE", "bin")
+  
+  #dataframe to store performance score standard deviations
+  crop_sds.df <- data.frame(matrix(nrow = 0, ncol = 5))
+  colnames(crop_sds.df) <- c("rmse", "rsq", "RMSE", "NSE", "bin")
+  
+  # aggregate 100 bins to 25 super bins
+  #crop_df_aggregated <- aggregator_function(crop_df)
+  
+  
+  ##### BIN #####
+  # for each (super) bin
+  for (z in 1:25) {
+
+    # select bin data, delete rows where yield is 0
+    bin_crop <- crop_df %>%
+      dplyr::filter(bin == z, ES_yield_A!= 0)
+    
+    #select data to be used in model
+    bin_data <- bin_crop %>%
+      dplyr::select(cell, x, y, ES_yield_A, N_rate, P_rate, K_rate, machinery, rescaled_pesticide_sum)
+    
+    #dataframe to store model performance results
+    bin.df <- data.frame(matrix(nrow = iterations, ncol = 5))
+    colnames(bin.df) <- c("iteration" ,"rmse", "rsq", "RMSE", "NSE")
+    
+    #save forest validation yields to dataframe
+    obs_vs_pred <- data.frame(matrix(nrow = 0, ncol = 4))
+    colnames(obs_vs_pred) <- c("cell", "observed", "model_yield", "iteration")
+    
+    #dataframe to store scenario results
+    bin_scenarios <- data.frame(matrix(nrow = 0, ncol = 13))
+    colnames(bin_scenarios) <- c("cell", "x", "y", "observed_normal_yield",
+                                 "scenario_percent",  "N_rate_shock",
+                                 "P_rate_shock", "K_rate_shock", 
+                                 "machinery_shock",
+                                 "rescaled_pesticide_sum_shock",
+                                 "shock_fert_only", "shock_all", "iteration")
+    
+    # dataframe to store ale-results
+    bin_ale_df <- data.frame(matrix(nrow = 0, ncol = 4))
+    colnames(bin_ale_df) <- c("ale_value", "input_rate", 
+                            "input_name", "iteration")
+    bin_ale_df$input_name <- as.character(bin_ale_df$input_name)
+    
+    ##### ITERATION #####
+    
+    #setup parallel computing
+    n_cores <- detectCores() - 1
+    cluster <- makeCluster(n_cores)
+    registerDoParallel(cluster)
+    
+    # create many forests with different sampling arrangement
+    parallel_results <- foreach(y= 1:iterations, .packages = c("dplyr", "tidyverse", "randomForest", "hydroGOF", "iml")) %dopar% one_iteration(bin_data, y)
+    
+    stopCluster(cluster)
+
+    # extract data from parallel computing results
+    for (iteration in 1:iterations) {
+      
+      iteration_results <- parallel_results[[iteration]]
+      
+      bin.df[iteration, ] <- iteration_results$bindf
+      
+      obs_vs_pred <- bind_rows(obs_vs_pred, iteration_results$obs_vs_pred)
+      
+      bin_scenarios <- bind_rows(bin_scenarios, iteration_results$bin_scenarios)
+      
+      bin_ale_df <- bind_rows(bin_ale_df, iteration_results$aledf)
+      
+    }
+    
+
+    # save observed vs predicted yield dataframe
+    save_name <- paste0(path_to_save, "validation/", crop_list[i], "/", crop_list[i],"_bin", z, "_validation.RData")
+    save(obs_vs_pred, file = save_name)
+    
+    save_perf_scores <- paste0(path_to_save, "performances/", crop_list[i], "/", crop_list[i],"_climatebin", z, "_perf_scores.RData")
+    save(bin.df, file = save_perf_scores)
+    
+    #add results from bin to summary tables
+    binsummary.df <- bin.df %>%
+      dplyr::summarise(across(everything(), mean))
+    binsummary.df$bin <- z
+    
+    crop_means.df <- bind_rows(crop_means.df, binsummary.df)
+    
+    
+    variances.df <- bin.df %>%
+      dplyr::summarise(across(everything(), var))
+    variances.df$bin <- z
+    
+    crop_vars.df <- bind_rows(crop_vars.df, variances.df)
+    
+    stdevs.df <- bin.df %>%
+      dplyr::summarise(across(everything(), sd))
+    stdevs.df$bin <- z
+    
+    crop_sds.df <- bind_rows(crop_sds.df, stdevs.df)
+    
+    #save bin scenarios
+    save_bin_scenarios <- paste0(path_to_save, "scenarios/", crop_list[i], "/", crop_list[i],"_climatebin", z, "_scenarios.RData")
+    save(bin_scenarios, file = save_bin_scenarios)
+    
+    #save bin ale df
+    save_bin_ale <- paste0(path_to_save, "ALEs/", crop_list[i], "/", crop_list[i],"_climatebin", z, "_aledf.RData")
+    save(bin_ale_df, file = save_bin_ale)
+    
+    rm(bin_scenarios)
+    rm(obs_vs_pred)
+    
+  }
+  
+  #save crop summaries
+  save_means <- paste0(path_to_save, "summaries/", crop_list[i], "_means.RData")
+  save(crop_means.df, file = save_means)
+  
+  save_vars <- paste0(path_to_save, "summaries/", crop_list[i], "_variances.RData")
+  save(crop_vars.df, file = save_vars)
+  
+  save_stdevs <- paste0(path_to_save, "summaries/", crop_list[i], "_stdevs.RData")
+  save(crop_sds.df, file = save_stdevs)
+ 
+}
+
+```
+
+
+```{r save scenario summary}
+
+
+##### Make and save crop scenario summary #####
+
+for (i in 9) {
+
+  #create empty summary dataframe
+  crop_scenarios <- data.frame(matrix(nrow = 0, ncol = 13))
+  colnames(crop_scenarios) <- c("cell", "scenario_percent", "x", "y", "observed_normal_yield", "N_rate_shock",
+                             "P_rate_shock", "K_rate_shock", "machinery_shock",
+                             "rescaled_pesticide_sum_shock", "shock_fert_only",
+                             "shock_all", "bin")
+  path_to_save <- "C:/Users/ahvoa1/data/results_irrigation/"
+  
+  # make a cropwide summary of scenarios, median results of iterations
+  crop_scenarios <- extract_scenarios_data(i, crop_scenarios)
+  
+  #save crop scenarios to scenarios folder
+  save_crop_scenarios <- paste0(path_to_save, "scenarios/", crop_list[i], "/", crop_list[i],"_scenario_summary.RData")
+  save(crop_scenarios, file = save_crop_scenarios)
+
+}
+```
+
+
